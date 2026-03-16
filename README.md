@@ -38,8 +38,8 @@ flowchart TD
   C --> D[Deploy to Prod (Azure Web App)]
   C --> E[Deploy to Prod Server]
 
-  D ---|Manual approval gate| D
-  E ---|Manual approval gate| E
+  D --|Manual approval gate|> D
+  E --|Manual approval gate|> E
 ```
 
 ### Production deployment (generic server)
