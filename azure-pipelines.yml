@@ -1,5 +1,11 @@
 trigger:
-- main
+  branches:
+    include:
+      - main
+  tags:
+    include:
+      - 'v*'
+      - '*.*.*'
 
 pr:
 - main
@@ -8,18 +14,40 @@ pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  NOTIFY_USERS: 'foo@bar,baz@qux'
-  IMAGE_REGISTRY_CONNECTION: 'ACR Demo'
-  IMAGE_REGISTRY: 'ADODemo'
-  IMAGE_REPOSITORY: 'adodemo'
-  REGISTRY_URL: 'adodemo.azurecr.io'
-  TAG: '$(Build.BuildId)'
-  AZURE_SUBSCRIPTION: 'Azure'
-  DEV_WEBAPP_NAME: 'ADODemo-Dev'
-  PROD_WEBAPP_NAME: 'ADODemo-Prod'
-  AWS_IP: '1.2.3.4'
-  SSH_KEY_FILE: 'adodemo-key.pem'
-  CONTAINER_PORT: '8080'
+- name: NOTIFY_USERS
+  value: 'foo@bar,baz@qux'
+- name: IMAGE_REGISTRY_CONNECTION
+  value: 'ACR Demo'
+- name: IMAGE_REGISTRY
+  value: 'ADODemo'
+- name: IMAGE_REPOSITORY
+  value: 'adodemo'
+- name: REGISTRY_URL
+  value: 'adodemo.azurecr.io'
+- name: ReleaseTag
+  value: ''
+- name: SourceTag
+  value: $[startsWith(variables['Build.SourceBranch'], 'refs/tags/') ? replace(variables['Build.SourceBranch'], 'refs/tags/', '') : '']
+- name: TAG
+  value: $[coalesce(variables['ReleaseTag'], variables['SourceTag'], variables['Build.BuildId'])]
+- name: AZURE_SUBSCRIPTION
+  value: 'Azure'
+- name: DEV_WEBAPP_NAME
+  value: 'ADODemo-Dev'
+- name: PROD_WEBAPP_NAME
+  value: 'ADODemo-Prod'
+- name: PROD_SERVER_IP
+  value: '1.2.3.4'
+- name: PROD_SSH_KEY_FILE
+  value: 'adodemo-key.pem'
+- name: PROD_SSH_USER
+  value: 'ubuntu'
+- name: ACR_USERNAME
+  value: ''
+- name: ACR_PASSWORD
+  value: ''
+- name: CONTAINER_PORT
+  value: '8080'
 
 stages:
 - stage: BuildApp
@@ -78,7 +106,7 @@ stages:
 - stage: DeployProdAzure
   displayName: 'Deploy to Azure Production'
   dependsOn: DeployDev
-  condition: succeeded()
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
   jobs:
   - job: ApproveRelease
     displayName: 'Manual Approval for Azure Production'
@@ -109,13 +137,13 @@ stages:
               DockerRepository: '$(IMAGE_REPOSITORY)'
               DockerImageTag: '$(TAG)'
 
-- stage: DeployProdAWS
-  displayName: 'Deploy to AWS Production'
+- stage: DeployProdServer
+  displayName: 'Deploy to Production Server'
   dependsOn: DeployDev
-  condition: succeeded()
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
   jobs:
   - job: ApproveRelease
-    displayName: 'Manual Approval for AWS Production'
+    displayName: 'Manual Approval for Production Deployment'
     timeoutInMinutes: 4320 # job times out in 3 days
     pool: server
     steps:
@@ -123,19 +151,23 @@ stages:
       timeoutInMinutes: 1440 # task times out in 1 day
       inputs:
         notifyUsers: '$(NOTIFY_USERS)'
-        instructions: 'Approve the release to AWS production'
+        instructions: 'Approve the release to production server'
   - job: DeployProd
-    displayName: 'Deploy to AWS Production'
+    displayName: 'Deploy to Production Server'
     dependsOn: ApproveRelease
     condition: succeeded()
     steps:
     - task: DownloadSecureFile@1
       name: sshKey
       inputs:
-        secureFile: '$(SSH_KEY_FILE)'
+        secureFile: '$(PROD_SSH_KEY_FILE)'
     - script: |
         sudo chmod 400 $(sshKey.secureFilePath)
-        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) ubuntu@$(AWS_IP) "
+        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) $(PROD_SSH_USER)@$(PROD_SERVER_IP) "
+          echo 'Logging in to ACR'
+          printf '%s' "$(ACR_PASSWORD)" | docker login $(REGISTRY_URL) -u "$(ACR_USERNAME)" --password-stdin
+          echo 'Pulling image from ACR'
+          docker pull $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG)
           echo 'Stopping existing containers for this image'
           docker ps -q --filter ancestor=$(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG) | xargs -r docker stop | xargs -r docker rm
           echo 'Running new container'
@@ -145,4 +177,4 @@ stages:
           echo 'Checking health'
           curl -f http://localhost:$(CONTAINER_PORT) || echo 'Health check failed, but continuing'
         "
-      displayName: 'Deploy to AWS EC2'
+      displayName: 'Deploy to Production Server'
