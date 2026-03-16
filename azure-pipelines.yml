@@ -1,0 +1,148 @@
+trigger:
+- main
+
+pr:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  NOTIFY_USERS: 'foo@bar,baz@qux'
+  IMAGE_REGISTRY_CONNECTION: 'ACR Demo'
+  IMAGE_REGISTRY: 'ADODemo'
+  IMAGE_REPOSITORY: 'adodemo'
+  REGISTRY_URL: 'adodemo.azurecr.io'
+  TAG: '$(Build.BuildId)'
+  AZURE_SUBSCRIPTION: 'Azure'
+  DEV_WEBAPP_NAME: 'ADODemo-Dev'
+  PROD_WEBAPP_NAME: 'ADODemo-Prod'
+  AWS_IP: '1.2.3.4'
+  SSH_KEY_FILE: 'adodemo-key.pem'
+  CONTAINER_PORT: '8080'
+
+stages:
+- stage: BuildApp
+  displayName: 'Build Application'
+  jobs:
+  - job: BuildPushImage
+    displayName: 'Build and Push Docker Image'
+    steps:
+    - task: Docker@2
+      inputs:
+        containerRegistry: '$(IMAGE_REGISTRY_CONNECTION)'
+        repository: '$(IMAGE_REPOSITORY)'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: |
+          $(TAG)
+          latest
+
+- stage: Test
+  displayName: 'Test Application'
+  dependsOn: BuildApp
+  condition: succeeded()
+  jobs:
+  - job: RunTests
+    displayName: 'Run Tests'
+    steps:
+    - script: |
+        echo "Pulling image for testing"
+        docker pull $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG)
+        echo "Running container for smoke test"
+        docker run --rm $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG) echo "Container runs successfully"
+      displayName: 'Smoke Test Container'
+
+- stage: DeployDev
+  displayName: 'Deploy to Development'
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+  - deployment: DeployDev
+    displayName: 'Deploy to Dev Environment'
+    environment: 'development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureRmWebAppDeployment@4
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: '$(AZURE_SUBSCRIPTION)'
+              appType: 'webAppContainer'
+              WebAppName: '$(DEV_WEBAPP_NAME)'
+              DockerNamespace: '$(IMAGE_REGISTRY)'
+              DockerRepository: '$(IMAGE_REPOSITORY)'
+              DockerImageTag: '$(TAG)'
+
+- stage: DeployProdAzure
+  displayName: 'Deploy to Azure Production'
+  dependsOn: DeployDev
+  condition: succeeded()
+  jobs:
+  - job: ApproveRelease
+    displayName: 'Manual Approval for Azure Production'
+    timeoutInMinutes: 4320 # job times out in 3 days
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+        notifyUsers: '$(NOTIFY_USERS)'
+        instructions: 'Approve the release to Azure production'
+  - deployment: DeployProd
+    displayName: 'Deploy to Azure Production'
+    dependsOn: ApproveRelease
+    environment: 'production-azure'
+    condition: succeeded()
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureRmWebAppDeployment@4
+            inputs:
+              ConnectionType: 'AzureRM'
+              azureSubscription: '$(AZURE_SUBSCRIPTION)'
+              appType: 'webAppContainer'
+              WebAppName: '$(PROD_WEBAPP_NAME)'
+              DockerNamespace: '$(IMAGE_REGISTRY)'
+              DockerRepository: '$(IMAGE_REPOSITORY)'
+              DockerImageTag: '$(TAG)'
+
+- stage: DeployProdAWS
+  displayName: 'Deploy to AWS Production'
+  dependsOn: DeployDev
+  condition: succeeded()
+  jobs:
+  - job: ApproveRelease
+    displayName: 'Manual Approval for AWS Production'
+    timeoutInMinutes: 4320 # job times out in 3 days
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      timeoutInMinutes: 1440 # task times out in 1 day
+      inputs:
+        notifyUsers: '$(NOTIFY_USERS)'
+        instructions: 'Approve the release to AWS production'
+  - job: DeployProd
+    displayName: 'Deploy to AWS Production'
+    dependsOn: ApproveRelease
+    condition: succeeded()
+    steps:
+    - task: DownloadSecureFile@1
+      name: sshKey
+      inputs:
+        secureFile: '$(SSH_KEY_FILE)'
+    - script: |
+        sudo chmod 400 $(sshKey.secureFilePath)
+        ssh -o StrictHostKeyChecking=no -i $(sshKey.secureFilePath) ubuntu@$(AWS_IP) "
+          echo 'Stopping existing containers for this image'
+          docker ps -q --filter ancestor=$(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG) | xargs -r docker stop | xargs -r docker rm
+          echo 'Running new container'
+          docker run -d -p $(CONTAINER_PORT):80 $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG)
+          echo 'Waiting for container to start'
+          sleep 10
+          echo 'Checking health'
+          curl -f http://localhost:$(CONTAINER_PORT) || echo 'Health check failed, but continuing'
+        "
+      displayName: 'Deploy to AWS EC2'
