@@ -1,1 +1,0 @@
-# ado-docker-demo
