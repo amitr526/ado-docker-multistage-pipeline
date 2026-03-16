@@ -34,8 +34,8 @@ The pipeline computes the final Docker tag as follows:
 ```mermaid
 flowchart TD
   A[Build & Push Image] --> B[Smoke Test]
-  B --> C[Deploy to Dev (Azure Web App)]
-  C --> D[Deploy to Prod (Azure Web App)]
+  B --> C["Deploy to Dev (Azure Web App)"]
+  C --> D["Deploy to Prod (Azure Web App)"]
   C --> E[Deploy to Prod Server]
 
   D --|Manual approval gate|> D
