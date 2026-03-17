@@ -103,6 +103,35 @@ stages:
               DockerRepository: '$(IMAGE_REPOSITORY)'
               DockerImageTag: '$(TAG)'
 
+- stage: DeployFooAzure
+  dependsOn: DeployDev
+  pool: server
+  steps:
+    - task: AzureCLI@2
+      displayName: "Run docker compose on target VM via az vm run-command"
+      inputs:
+        azureSubscription: 'ekp-service-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az vm run-command invoke \
+            --resource-group $(targetResourceGroup) \
+            --name $(targetVmName) \
+            --command-id RunShellScript \
+            --scripts "
+                # cd /home/$(targetUser)
+                # az login --identity
+                docker pull $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG)
+                echo 'Stopping existing containers for this image'
+                docker ps -q --filter ancestor=$(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG) | xargs -r docker stop | xargs -r docker rm
+                echo 'Running new container'
+                docker run -d -p $(CONTAINER_PORT):80 $(REGISTRY_URL)/$(IMAGE_REPOSITORY):$(TAG)
+                echo 'Waiting for container to start'
+                sleep 10
+                echo 'Checking health'
+                curl -f http://localhost:$(CONTAINER_PORT) || echo 'Health check failed, but continuing'
+              "
+
 - stage: DeployProdAzure
   displayName: 'Deploy to Azure Production'
   dependsOn: DeployDev
